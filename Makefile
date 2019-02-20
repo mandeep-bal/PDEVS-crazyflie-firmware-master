@@ -1,0 +1,433 @@
+# CrazyFlie's Makefile
+# Copyright (c) 2011,2012 Bitcraze AB
+# This Makefile compiles all the objet file to ./bin/ and the resulting firmware
+# image in ./cfX.elf and ./cfX.bin
+
+# Put your personal build config in tools/make/config.mk and DO NOT COMMIT IT!
+# Make a copy of tools/make/config.mk.example to get you started
+-include tools/make/config.mk
+-include boost_reference.mk
+
+CFLAGS += $(EXTRA_CFLAGS)
+
+######### JTAG and environment configuration ##########
+OPENOCD           ?= openocd
+OPENOCD_INTERFACE ?= interface/stlink-v2.cfg
+OPENOCD_CMDS      ?=
+CROSS_COMPILE     ?= arm-none-eabi-
+PYTHON2           ?= python2
+DFU_UTIL          ?= dfu-util
+CLOAD             ?= 1
+DEBUG             ?= 0
+CLOAD_SCRIPT      ?= python3 -m cfloader
+CLOAD_CMDS        ?=
+CLOAD_ARGS        ?=
+PLATFORM					?= CF2
+LPS_TDMA_ENABLE   ?= 0
+LPS_TDOA_ENABLE   ?= 0
+
+######### Stabilizer configuration ##########
+##### Sets the name of the stabilizer module to use.
+ESTIMATOR          ?= any
+CONTROLLER         ?= pid
+POWER_DISTRIBUTION ?= stock
+SENSORS 					 ?= cf2
+
+######### Test activation ##########
+ifeq ($(PLATFORM), CF2)
+OPENOCD_TARGET    ?= target/stm32f4x_stlink.cfg
+USE_FPU           ?= 1
+endif
+
+
+ifeq ($(PLATFORM), CF2)
+# Now needed for SYSLINK
+CFLAGS += -DUSE_RADIOLINK_CRTP     # Set CRTP link to radio
+CFLAGS += -DENABLE_UART          # To enable the uart
+REV               ?= D
+endif
+
+#OpenOCD conf
+RTOS_DEBUG        ?= 0
+
+############### Location configuration ################
+FREERTOS = src/lib/FreeRTOS
+ifeq ($(USE_FPU), 1)
+PORT = $(FREERTOS)/portable/GCC/ARM_CM4F
+else
+PORT = $(FREERTOS)/portable/GCC/ARM_CM3
+endif
+
+ifeq ($(PLATFORM), CF2)
+LINKER_DIR = tools/make/F405/linker
+ST_OBJ_DIR  = tools/make/F405
+endif
+
+LIB = src/lib
+
+################ Build configuration ##################
+# St Lib
+VPATH_CF2 += $(LIB)/CMSIS/STM32F4xx/Source/
+VPATH_CF2 += $(LIB)/STM32_USB_Device_Library/Core/src
+VPATH_CF2 += $(LIB)/STM32_USB_OTG_Driver/src
+VPATH_CF2 += src/deck/api src/deck/core src/deck/drivers/src src/deck/drivers/src/test
+CRT0_CF2 = startup_stm32f40xx.o system_stm32f4xx.o
+
+# Should maybe be in separate file?
+-include $(ST_OBJ_DIR)/st_obj.mk
+
+# USB obj
+ST_OBJ_CF2 += usb_core.o usb_dcd_int.o usb_dcd.o
+# USB Device obj
+ST_OBJ_CF2 += usbd_ioreq.o usbd_req.o usbd_core.o
+
+# libdw dw1000 driver
+VPATH_CF2 += vendor/libdw1000/src
+
+# FreeRTOS
+VPATH += $(PORT)
+PORT_OBJ = port.o
+VPATH +=  $(FREERTOS)/portable/MemMang
+MEMMANG_OBJ = heap_4.o
+
+VPATH += $(FREERTOS)
+FREERTOS_OBJ = list.o tasks.o queue.o timers.o $(MEMMANG_OBJ)
+
+#FatFS
+VPATH_CF2 += $(LIB)/FatFS
+FATFS_OBJ  = diskio.o ff.o syscall.o unicode.o fatfs_sd.o
+
+# Crazyflie sources
+VPATH += src/init src/hal/src src/modules/src src/utils/src src/drivers/bosch/src src/drivers/src
+VPATH_CF2 += src/platform/cf2
+
+ifeq ($(PLATFORM), CF2)
+VPATH +=$(VPATH_CF2)
+endif
+
+
+###### Added for PDEVS-crazyflie-firmware ######
+PDEVS_MODEL_DIR = src/pdevs_model
+
+# ECDBoost
+VPATH += $(LIB)
+VPATH += $(LIB)/ecdboost/utilities
+VPATH += $(LIB)/ecdboost/builtins
+
+VPATH += $(PDEVS_MODEL_DIR)
+
+############### Source files configuration ################
+
+# Init
+PROJ_OBJ += main.o
+PROJ_OBJ_CF2 += platform_cf2.o
+
+# Drivers
+PROJ_OBJ += exti.o nvic.o motors.o
+PROJ_OBJ_CF2 += led_f405.o mpu6500.o i2cdev_f405.o ws2812_cf2.o lps25h.o i2c_drv.o
+PROJ_OBJ_CF2 += ak8963.o eeprom.o maxsonar.o piezo.o
+PROJ_OBJ_CF2 += uart_syslink.o swd.o uart1.o uart2.o watchdog.o
+PROJ_OBJ_CF2 += cppm.o
+PROJ_OBJ_CF2 += bmi055_accel.o bmi055_gyro.o bmi160.o bmp280.o bstdr_comm_support.o bmm150.o
+PROJ_OBJ_CF2 += pca9685.o vl53l0x.o pca95x4.o
+# USB Files
+PROJ_OBJ_CF2 += usb_bsp.o usblink.o usbd_desc.o usb.o
+
+# Hal
+PROJ_OBJ += crtp.o ledseq.o freeRTOSdebug.o buzzer.o
+PROJ_OBJ_CF2 +=  pm_f405.o syslink.o radiolink.o ow_syslink.o proximity.o usec_time.o
+
+PROJ_OBJ_CF2 +=  sensors_$(SENSORS).o
+# libdw
+PROJ_OBJ_CF2 += libdw1000.o libdw1000Spi.o
+
+# Modules
+PROJ_OBJ += system.o comm.o console.o pid.o crtpservice.o param.o
+PROJ_OBJ += log.o worker.o trigger.o sitaw.o queuemonitor.o msp.o
+PROJ_OBJ_CF2 += platformservice.o sound_cf2.o extrx.o sysload.o mem_cf2.o
+
+# Stabilizer modules
+PROJ_OBJ += commander.o crtp_commander.o crtp_commander_rpyt.o
+PROJ_OBJ += crtp_commander_generic.o crtp_localization_service.o
+PROJ_OBJ += attitude_pid_controller.o sensfusion6.o stabilizer.o
+PROJ_OBJ += position_estimator_altitude.o position_controller_pid.o
+PROJ_OBJ += estimator.o estimator_complementary.o
+PROJ_OBJ += controller_$(CONTROLLER).o
+PROJ_OBJ += power_distribution_$(POWER_DISTRIBUTION).o
+PROJ_OBJ_CF2 += estimator_kalman.o
+
+
+# Deck Core
+PROJ_OBJ_CF2 += deck.o deck_info.o deck_drivers.o deck_test.o
+
+# Deck API
+PROJ_OBJ_CF2 += deck_constants.o
+PROJ_OBJ_CF2 += deck_digital.o
+PROJ_OBJ_CF2 += deck_analog.o
+PROJ_OBJ_CF2 += deck_spi.o
+
+# Decks
+PROJ_OBJ_CF2 += bigquad.o
+PROJ_OBJ_CF2 += rzr.o
+PROJ_OBJ_CF2 += ledring12.o
+PROJ_OBJ_CF2 += buzzdeck.o
+PROJ_OBJ_CF2 += gtgps.o
+PROJ_OBJ_CF2 += cppmdeck.o
+PROJ_OBJ_CF2 += usddeck.o
+PROJ_OBJ_CF2 += zranger.o
+PROJ_OBJ_CF2 += locodeck.o
+PROJ_OBJ_CF2 += lpsTwrTag.o
+PROJ_OBJ_CF2 += lpsTdoaTag.o
+PROJ_OBJ_CF2 += outlierFilter.o
+PROJ_OBJ_CF2 += flowdeck.o
+PROJ_OBJ_CF2 += oa.o
+
+ifeq ($(LPS_TDOA_ENABLE), 1)
+CFLAGS += -DLPS_TDOA_ENABLE
+endif
+
+ifeq ($(LPS_TDMA_ENABLE), 1)
+CFLAGS += -DLPS_TDMA_ENABLE
+endif
+
+#Deck tests
+PROJ_OBJ_CF2 += exptest.o
+#PROJ_OBJ_CF2 += bigquadtest.o
+
+
+# Utilities
+PROJ_OBJ += filter.o cpuid.o cfassert.o  eprintf.o crc.o num.o debug.o
+PROJ_OBJ += FreeRTOS-openocd.o
+PROJ_OBJ_CF2 += configblockeeprom.o crc_bosch.o
+PROJ_OBJ_CF2 += sleepus.o
+
+# Libs
+PROJ_OBJ_CF2 += libarm_math.a
+
+PDEVS_RELATED_OBJ = pdevs_utils.o CF2_timer.o  # PDEVS object files
+
+OBJ = $(FREERTOS_OBJ) $(PORT_OBJ) $(ST_OBJ) $(PROJ_OBJ) $(PDEVS_RELATED_OBJ)
+ifeq ($(PLATFORM), CF2)
+OBJ += $(CRT0_CF2) $(ST_OBJ_CF2) $(FATFS_OBJ) $(PROJ_OBJ_CF2)
+endif
+
+ifdef P
+  C_PROFILE = -D P_$(P)
+endif
+
+############### Compilation configuration ################
+AS = $(CROSS_COMPILE)as
+CC = $(CROSS_COMPILE)gcc
+CPP =$(CROSS_COMPILE)g++
+LD = $(CROSS_COMPILE)g++
+SIZE = $(CROSS_COMPILE)size
+OBJCOPY = $(CROSS_COMPILE)objcopy
+GDB = $(CROSS_COMPILE)gdb
+
+INCLUDES  = -I$(FREERTOS)/include -I$(PORT) -Isrc
+INCLUDES += -Isrc/config -Isrc/hal/interface -Isrc/modules/interface
+INCLUDES += -Isrc/utils/interface -Isrc/drivers/interface -Isrc/platform
+INCLUDES += -Ivendor/CMSIS/CMSIS/Include -Isrc/drivers/bosch/interface
+
+PDEVS_INCLUDES = -I$(BOOST_LIB_DIR)
+PDEVS_INCLUDES += -I$(LIB)                     # including ECDBoost library
+PDEVS_INCLUDES += -I$(LIB)/ecdboost/utilities  # including ecdboost utilities
+PDEVS_INCLUDES += -I$(LIB)/ecdboost/builtins   # including ecdboost builtins
+PDEVS_INCLUDES += -I$(PDEVS_MODEL_DIR)
+INCLUDES += $(PDEVS_INCLUDES)  # This is reused for the simulation target
+
+
+INCLUDES_CF2 += -I$(LIB)/STM32F4xx_StdPeriph_Driver/inc
+INCLUDES_CF2 += -I$(LIB)/CMSIS/STM32F4xx/Include
+INCLUDES_CF2 += -I$(LIB)/STM32_USB_Device_Library/Core/inc
+INCLUDES_CF2 += -I$(LIB)/STM32_USB_OTG_Driver/inc
+INCLUDES_CF2 += -Isrc/deck/interface -Isrc/deck/drivers/interface
+INCLUDES_CF2 += -Ivendor/libdw1000/inc
+INCLUDES_CF2 += -I$(LIB)/FatFS
+
+ifeq ($(USE_FPU), 1)
+	PROCESSOR = -mcpu=cortex-m4 -mthumb -mfloat-abi=hard -mfpu=fpv4-sp-d16
+	CFLAGS += -fno-math-errno -DARM_MATH_CM4 -D__FPU_PRESENT=1 -D__TARGET_FPU_VFP
+	CPPFLAGS += -fno-math-errno -DARM_MATH_CM4 -D__FPU_PRESENT=1 -D__TARGET_FPU_VFP
+else
+	ifeq ($(PLATFORM), CF2)
+		PROCESSOR = -mcpu=cortex-m4 -mthumb
+	endif
+endif
+
+#Flags required by the ST library
+STFLAGS_CF2 = -DSTM32F4XX -DSTM32F40_41xxx -DHSE_VALUE=8000000 -DUSE_STDPERIPH_DRIVER
+
+# Check if this is needed
+###########
+# Modified for pdevs-crazyflie-firmware
+STFLAGS_CF2 += -DTARGET_M4 -DTARGET_CORTEX_M -DTARGET_STM -DTARGET_STM32F4 -DTOOLCHAIN_GCC_ARM -DTOOLCHAIN_GCC -D__CORTEX_M4 -DARM_MATH_CM4
+###########
+
+ifeq ($(DEBUG), 1)
+  CFLAGS += -O0 -g3 -DDEBUG
+  CPPFLAGS += -O0 -g3 -DDEBUG
+else
+	# Fail on warnings
+  CFLAGS += -Os -g3 -Werror
+  CPPFLAGS += -Os -g3 -Werror
+endif
+
+ifeq ($(LTO), 1)
+  CFLAGS += -flto
+endif
+
+ifeq ($(USE_ESKYLINK), 1)
+  CFLAGS += -DUSE_ESKYLINK
+endif
+
+CFLAGS += -DBOARD_REV_$(REV) -DESTIMATOR_NAME=$(ESTIMATOR)Estimator -DCONTROLLER_TYPE_$(CONTROLLER) -DPOWER_DISTRIBUTION_TYPE_$(POWER_DISTRIBUTION)
+
+CFLAGS += $(PROCESSOR) $(INCLUDES) $(STFLAGS)
+ifeq ($(PLATFORM), CF2)
+CFLAGS += $(INCLUDES_CF2) $(STFLAGS_CF2)
+endif
+
+CFLAGS += -Wall -Wmissing-braces -fno-strict-aliasing $(C_PROFILE) -std=gnu11
+# Compiler flags to generate dependency files:
+CFLAGS += -MD -MP -MF $(BIN)/dep/$(@).d -MQ $(@)
+#Permits to remove un-used functions and global variables from output file
+CFLAGS += -ffunction-sections -fdata-sections
+# Prevent promoting floats to doubles
+CFLAGS += -Wdouble-promotion
+
+
+###########
+# Modified for PDEVS-crazyflie-firmware
+# Compiler flags to generate dependency files:
+CPPFLAGS += -MD -MP -MF $(BIN)/dep/$(@).d -MQ $(@)
+# Permits to remove un-used functions and global variables from output file
+CPPFLAGS += -fno-exceptions -ffunction-sections -fdata-sections
+CPPFLAGS += -fno-common -fmessage-length=0 -Wunused-local-typedefs -Wextra #-Wreorder -Wunused-parameter 
+CPPFLAGS += -fomit-frame-pointer -fpermissive
+
+CPPFLAGS += $(PROCESSOR) $(INCLUDES) $(STFLAGS)
+
+ifeq ($(PLATFORM), CF2)
+CPPFLAGS += $(INCLUDES_CF2) $(STFLAGS_CF2)
+endif
+###########
+
+ASFLAGS = $(PROCESSOR) $(INCLUDES)
+
+###########
+# Modified for PDEVS-crazyflie-firmware
+####
+# OLD
+# LDFLAGS = --specs=nano.specs $(PROCESSOR) -Wl,-Map=$(PROG).map,--cref,--gc-sections,--undefined=uxTopUsedPriority
+####
+
+LDFLAGS = $(PROCESSOR) -Wl,--gc-sections --specs=rdimon.specs -Wl,-Map=$(PROG).map,--cref -lstdc++ -lsupc++ -lm -lc -lgcc -lnosys
+###########
+
+#Flags required by the ST library
+ifeq ($(CLOAD), 1)
+  LDFLAGS += -T $(LINKER_DIR)/FLASH_CLOAD.ld
+  LOAD_ADDRESS = 0x8004000
+else
+  LDFLAGS += -T $(LINKER_DIR)/FLASH.ld
+  LOAD_ADDRESS = 0x8000000
+endif
+
+ifeq ($(LTO), 1)
+  LDFLAGS += -Os -flto -fuse-linker-plugin
+endif
+
+#Program name
+PROG = cf2
+#Where to compile the .o
+BIN = bin
+VPATH += $(BIN)
+
+#Dependency files to include
+DEPS := $(foreach o,$(OBJ),$(BIN)/dep/$(o).d)
+
+##################### Misc. ################################
+ifeq ($(SHELL),/bin/sh)
+  COL_RED=\033[1;31m
+  COL_GREEN=\033[1;32m
+  COL_RESET=\033[m
+endif
+
+#################### Targets ###############################
+
+
+all: check_dependencies build
+build: compile size
+compile: $(PROG).hex $(PROG).bin $(PROG).dfu
+
+## Exclusive for simulation
+DEFINES = -DENABLE_SIMULATION
+CPP_FILES = src/init/main.cpp $(LIB)/ecdboost/builtins/linux_timer.cpp
+
+simulation:
+	g++ $(DEFINES) $(PDEVS_INCLUDES) -fpermissive -std=c++11 $(CPP_FILES) -o simulation.bin
+
+##
+
+libarm_math.a:
+	+$(MAKE) -C tools/make/cmsis_dsp/ V=$(V)
+
+size: compile
+	echo ""
+	@$(SIZE) -B $(PROG).elf
+
+#Radio bootloader
+cload:
+ifeq ($(CLOAD), 1)
+	$(CLOAD_SCRIPT) $(CLOAD_CMDS) flash $(CLOAD_ARGS) $(PROG).bin stm32-fw
+else
+	@echo "Only cload build can be bootloaded. Launch build and cload with CLOAD=1"
+endif
+
+#Flash the stm.
+flash:
+	$(OPENOCD) -d2 -f $(OPENOCD_INTERFACE) $(OPENOCD_CMDS) -f $(OPENOCD_TARGET) -c init -c targets -c "reset halt" \
+                 -c "flash write_image erase $(PROG).elf" -c "verify_image $(PROG).elf" -c "reset run" -c shutdown
+
+flash_dfu:
+	$(DFU_UTIL) -a 0 -D $(PROG).dfu
+
+#STM utility targets
+halt:
+	$(OPENOCD) -d0 -f $(OPENOCD_INTERFACE) $(OPENOCD_CMDS) -f $(OPENOCD_TARGET) -c init -c targets -c "halt" -c shutdown
+
+reset:
+	$(OPENOCD) -d0 -f $(OPENOCD_INTERFACE) $(OPENOCD_CMDS) -f $(OPENOCD_TARGET) -c init -c targets -c "reset" -c shutdown
+
+openocd:
+	$(OPENOCD) -d2 -f $(OPENOCD_INTERFACE) $(OPENOCD_CMDS) -f $(OPENOCD_TARGET) -c init -c targets -c "\$$_TARGETNAME configure -rtos auto"
+
+trace:
+	$(OPENOCD) -d2 -f $(OPENOCD_INTERFACE) $(OPENOCD_CMDS) -f $(OPENOCD_TARGET) -c init -c targets -f tools/trace/enable_trace.cfg
+
+gdb: $(PROG).elf
+	$(GDB) -ex "target remote localhost:3333" -ex "monitor reset halt" $^
+
+erase:
+	$(OPENOCD) -d2 -f $(OPENOCD_INTERFACE) -f $(OPENOCD_TARGET) -c init -c targets -c "halt" -c "stm32f4x mass_erase 0" -c shutdown
+
+#Print preprocessor #defines
+prep:
+	@$(CC) $(CFLAGS) -dM -E - < /dev/null
+
+check_dependencies: check_submodules
+ifeq (,$(wildcard boost_reference.mk))
+	$(error The reference to the boost library is needed. Create it by following the instructions in README.md)
+endif
+
+check_submodules:
+	@$(PYTHON2) tools/make/check-for-submodules.py
+
+include tools/make/targets.mk
+
+#include dependencies
+-include $(DEPS)
+
+unit:
+	rake unit "DEFINES=$(CFLAGS)" "FILES=$(FILES)"
